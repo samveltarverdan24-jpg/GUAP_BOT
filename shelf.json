@@ -1,0 +1,20 @@
+{
+    "max_weight": 10.0,
+    "books": [
+        {
+            "author": "Пушкин",
+            "weight": 2.5,
+            "price": 500
+        },
+        {
+            "author": "Достоевский",
+            "weight": 3.0,
+            "price": 700
+        },
+        {
+            "author": "Толстой",
+            "weight": 4.0,
+            "price": 1000
+        }
+    ]
+}

@@ -1,0 +1,4 @@
+culinary_expert.db
+__pycache__/
+.venv/
+.env
