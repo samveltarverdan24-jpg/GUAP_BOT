@@ -14,7 +14,10 @@ from telegram.request import HTTPXRequest
 # ==========================================
 # КОНФИГУРАЦИЯ
 # ==========================================
-TOKEN = "8956417768:AAEH9G9F-gZPfAfBFNIKvwKlZqpj76OsyGY"
+import os
+from dotenv import load_dotenv
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
 PROXY_URL = "http://127.0.0.1:10809"  
 DB_URL = "sqlite:///culinary_expert.db"
 
