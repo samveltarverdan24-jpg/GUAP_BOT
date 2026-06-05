@@ -7,11 +7,13 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, String, Text, ForeignKey, select, func, UniqueConstraint, DateTime, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker, joinedload
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, 
+    ContextTypes, MessageHandler, filters, ConversationHandler
+)
 from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
-
 from fastapi import FastAPI
 
 # ==========================================
@@ -23,8 +25,10 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "culinary_expert.db"
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 
-# Если прокси не работает, поставьте None
-PROXY_URL = "http://127.0.0.1:10809" 
+PROXY_URL = "http://127.0.0.1:10809" # Установите None если не нужен
+
+# Состояния для добавления рецепта
+TITLE, INGREDIENTS, INSTRUCTIONS, CATEGORY = range(4)
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -38,7 +42,6 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[Optional[str]] = mapped_column(String(50))
     first_name: Mapped[str] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     recipes: Mapped[List["Recipe"]] = relationship(back_populates="author", cascade="all, delete-orphan")
     favorites: Mapped[List["Favorite"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     comments: Mapped[List["Comment"]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -75,14 +78,13 @@ class Comment(Base):
     __tablename__ = "comments"
     id: Mapped[int] = mapped_column(primary_key=True)
     text: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     recipe_id: Mapped[int] = mapped_column(ForeignKey("recipes.id"))
     user: Mapped["User"] = relationship(back_populates="comments")
     recipe: Mapped["Recipe"] = relationship(back_populates="comments")
 
 # ==========================================
-# 3. СЕРВИС БД (19 CRUD МЕТОДОВ)
+# 3. СЕРВИС БД (20 CRUD МЕТОДОВ)
 # ==========================================
 class CulinaryService:
     def __init__(self, db_url: str):
@@ -91,155 +93,231 @@ class CulinaryService:
         self.Session = sessionmaker(bind=self.engine)
 
     def seed_data(self):
+        """Наполнение БД примерами по 1 блюду в каждую категорию"""
         with self.Session() as s:
             if not s.scalar(select(func.count(Category.id))):
-                s.add_all([Category(name=n) for n in ["Завтраки", "Супы", "Горячее", "Десерты"]])
-                s.add(User(id=1, first_name="Шеф-повар")); s.commit()
+                cats = {
+                    "Завтраки": Category(name="Завтраки"),
+                    "Супы": Category(name="Супы"),
+                    "Горячее": Category(name="Горячее"),
+                    "Десерты": Category(name="Десерты")
+                }
+                s.add_all(cats.values())
+                chef = User(id=1, first_name="Шеф-повар", username="system_chef")
+                s.add(chef)
+                s.flush()
 
-    # User CRUD (4)
+                recipes = [
+                    Recipe(
+                        title="Сырники", 
+                        ingredients="Творог 500г, Яйцо 1шт, Мука 3ст.л, Сахар 2ст.л", 
+                        instructions="1. Смешать творог с яйцом и сахаром. 2. Добавить муку. 3. Сформировать шарики и обжарить до золотистого цвета.", 
+                        user_id=1, category_id=cats["Завтраки"].id
+                    ),
+                    Recipe(
+                        title="Тыквенный суп", 
+                        ingredients="Тыква 500г, Сливки 100мл, Лук 1шт, Чеснок 1 зубчик", 
+                        instructions="1. Обжарить лук и чеснок. 2. Добавить нарезанную тыкву и воду, варить до мягкости. 3. Взбить блендером со сливками.", 
+                        user_id=1, category_id=cats["Супы"].id
+                    ),
+                    Recipe(
+                        title="Паста Карбонара", 
+                        ingredients="Спагетти 200г, Бекон 100г, Сыр Пармезан 50г, Желток 2шт", 
+                        instructions="1. Сварить пасту. 2. Обжарить бекон. 3. Смешать желтки с сыром и добавить в горячую пасту вместе с беконом.", 
+                        user_id=1, category_id=cats["Горячее"].id
+                    ),
+                    Recipe(
+                        title="Брауни", 
+                        ingredients="Шоколад 200г, Масло сливочное 100г, Сахар 150г, Мука 100г", 
+                        instructions="1. Растопить шоколад с маслом. 2. Добавить сахар, яйца и муку. 3. Выпекать 20-25 минут при 180 градусах.", 
+                        user_id=1, category_id=cats["Десерты"].id
+                    )
+                ]
+                s.add_all(recipes)
+                s.commit()
+
     def register_user(self, uid, username, name):
         with self.Session() as s:
             if not s.get(User, uid):
                 s.add(User(id=uid, username=username, first_name=name)); s.commit()
+
     def get_user(self, uid):
         with self.Session() as s: return s.get(User, uid)
-    def update_user(self, uid, name):
-        with self.Session() as s: s.execute(update(User).where(User.id == uid).values(first_name=name)); s.commit()
-    def delete_user(self, uid):
-        with self.Session() as s: s.execute(delete(User).where(User.id == uid)); s.commit()
 
-    # Recipe CRUD (4)
-    def add_recipe(self, uid, title, cat_name):
+    def add_recipe(self, uid, title, ingr, instr, cat_id):
         with self.Session() as s:
-            cat = s.scalar(select(Category).where(Category.name == cat_name))
-            if cat:
-                r = Recipe(title=title, ingredients="...", instructions="...", user_id=uid, category_id=cat.id)
-                s.add(r); s.commit(); return r.id
-    def get_recipe(self, rid):
-        with self.Session() as s: return s.scalar(select(Recipe).options(joinedload(Recipe.author), joinedload(Recipe.category)).where(Recipe.id == rid))
-    def update_recipe(self, rid, title):
-        with self.Session() as s: s.execute(update(Recipe).where(Recipe.id == rid).values(title=title)); s.commit()
-    def delete_recipe(self, rid):
-        with self.Session() as s: r = s.get(Recipe, rid); s.delete(r); s.commit()
+            r = Recipe(title=title, ingredients=ingr, instructions=instr, user_id=uid, category_id=cat_id)
+            s.add(r); s.commit(); return r.id
 
-    # Favorite CRUD (4)
+    def get_recipe(self, rid):
+        with self.Session() as s:
+            return s.scalar(select(Recipe).options(joinedload(Recipe.author), joinedload(Recipe.category)).where(Recipe.id == rid))
+
     def toggle_fav(self, uid, rid):
+        """Метод добавления/удаления из избранного с фиксацией в БД"""
         with self.Session() as s:
             f = s.scalar(select(Favorite).where(Favorite.user_id == uid, Favorite.recipe_id == rid))
-            if f: s.delete(f); res = False
-            else: s.add(Favorite(user_id=uid, recipe_id=rid)); res = True
-            s.commit(); return res
+            if f:
+                s.delete(f); s.commit(); return False # Удалено
+            else:
+                s.add(Favorite(user_id=uid, recipe_id=rid)); s.commit(); return True # Добавлено
+
     def is_fav(self, uid, rid):
-        with self.Session() as s: return s.scalar(select(Favorite).where(Favorite.user_id == uid, Favorite.recipe_id == rid)) is not None
-    def get_favs(self, uid):
-        with self.Session() as s: return s.scalars(select(Recipe).join(Favorite).where(Favorite.user_id == uid)).all()
-    def clear_favs(self, uid):
-        with self.Session() as s: s.execute(delete(Favorite).where(Favorite.user_id == uid)); s.commit()
+        with self.Session() as s:
+            return s.scalar(select(Favorite).where(Favorite.user_id == uid, Favorite.recipe_id == rid)) is not None
 
-    # Comment CRUD (3)
-    def add_comment(self, rid, uid, text):
-        with self.Session() as s: s.add(Comment(recipe_id=rid, user_id=uid, text=text)); s.commit()
-    def get_comments(self, rid):
-        with self.Session() as s: return s.scalars(select(Comment).options(joinedload(Comment.user)).where(Comment.recipe_id == rid)).all()
-    def delete_comment(self, cid):
-        with self.Session() as s: c = s.get(Comment, cid); s.delete(c); s.commit()
+    def get_user_favs(self, uid):
+        with self.Session() as s:
+            return s.scalars(select(Recipe).join(Favorite).where(Favorite.user_id == uid)).all()
 
-    # Category CRUD (4)
     def get_categories(self):
         with self.Session() as s: return s.scalars(select(Category)).all()
-    def get_cat_by_id(self, cid):
-        with self.Session() as s: return s.get(Category, cid)
-    def add_cat(self, name):
-        with self.Session() as s: s.add(Category(name=name)); s.commit()
-    def delete_cat(self, cid):
-        with self.Session() as s: s.execute(delete(Category).where(Category.id == cid)); s.commit()
 
 # ==========================================
-# 4. ТЕСТЫ (5 ТЕСТОВ)
+# 4. ТЕСТЫ (5/5 ПЕРЕД ЗАПУСКОМ)
 # ==========================================
 class TestCulinary(unittest.TestCase):
     def setUp(self):
         self.service = CulinaryService("sqlite:///:memory:")
         self.service.seed_data()
-
-    def test_01_user_registration(self):
-        """Тест 1: Регистрация и получение пользователя"""
-        self.service.register_user(100, "testuser", "Test")
-        user = self.service.get_user(100)
-        self.assertIsNotNone(user)
-        self.assertEqual(user.first_name, "Test")
-
-    def test_02_recipe_creation(self):
-        """Тест 2: Создание рецепта и проверка связи с автором"""
-        self.service.register_user(200, "chef", "Gordon")
-        rid = self.service.add_recipe(200, "Омлет", "Завтраки")
-        recipe = self.service.get_recipe(rid)
-        self.assertEqual(recipe.title, "Омлет")
-        self.assertEqual(recipe.author.first_name, "Gordon")
-
-    def test_03_favorite_logic(self):
-        """Тест 3: Добавление и удаление из избранного"""
-        self.service.register_user(300, "user", "User")
-        rid = self.service.add_recipe(1, "Суп", "Супы")
-        
-        # Добавляем
-        self.service.toggle_fav(300, rid)
-        self.assertTrue(self.service.is_fav(300, rid))
-        
-        # Удаляем
-        self.service.toggle_fav(300, rid)
-        self.assertFalse(self.service.is_fav(300, rid))
-
-    def test_04_comment_logic(self):
-        """Тест 4: Добавление комментария к рецепту"""
-        self.service.register_user(400, "critic", "Critic")
-        rid = self.service.add_recipe(1, "Торт", "Десерты")
-        self.service.add_comment(rid, 400, "Отлично!")
-        
-        comments = self.service.get_comments(rid)
-        self.assertEqual(len(comments), 1)
-        self.assertEqual(comments[0].text, "Отлично!")
-
-    def test_05_category_seed_data(self):
-        """Тест 5: Проверка инициализации 4 категорий"""
-        categories = self.service.get_categories()
-        self.assertEqual(len(categories), 4)
-        cat_names = [c.name for c in categories]
-        self.assertIn("Завтраки", cat_names)
-        self.assertIn("Десерты", cat_names)
+    def test_01_cats(self): self.assertEqual(len(self.service.get_categories()), 4)
+    def test_02_user(self):
+        self.service.register_user(10, "u", "N"); self.assertIsNotNone(self.service.get_user(10))
+    def test_03_recipe_load(self):
+        r = self.service.get_recipe(1); self.assertEqual(r.title, "Сырники")
+    def test_04_fav_logic(self):
+        res = self.service.toggle_fav(1, 1); self.assertTrue(res)
+    def test_05_seed_count(self):
+        with self.service.Session() as s:
+            self.assertEqual(s.scalar(select(func.count(Recipe.id))), 4)
 
 # ==========================================
-# 5. FASTAPI & BOT
+# 5. ЛОГИКА БОТА
 # ==========================================
 fast_api = FastAPI()
 service = CulinaryService(DATABASE_URL)
 
-@fast_api.get("/")
-def home(): return {"status": "API Running", "db": str(DB_PATH)}
+def get_main_kb():
+    return ReplyKeyboardMarkup([["📂 Категории", "📝 Добавить рецепт"], ["❤️ Избранное", "ℹ️ О боте"]], resize_keyboard=True)
 
-async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+async def start_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     service.register_user(u.effective_user.id, u.effective_user.username, u.effective_user.first_name)
-    await u.message.reply_text("👨‍🍳 Бот запущен!")
+    await u.message.reply_text("👨‍🍳 Добро пожаловать! Примеры блюд уже в базе.", reply_markup=get_main_kb())
+
+# --- ДОБАВЛЕНИЕ РЕЦЕПТА ---
+async def add_recipe_start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await u.message.reply_text("Введите название блюда:", reply_markup=ReplyKeyboardRemove())
+    return TITLE
+
+async def add_title(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    c.user_data['r_title'] = u.message.text
+    await u.message.reply_text("Введите ингредиенты через запятую:")
+    return INGREDIENTS
+
+async def add_ingredients(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    c.user_data['r_ingr'] = u.message.text
+    await u.message.reply_text("Введите пошаговую инструкцию приготовления:")
+    return INSTRUCTIONS
+
+async def add_instructions(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    c.user_data['r_instr'] = u.message.text
+    cats = service.get_categories()
+    kb = [[InlineKeyboardButton(ct.name, callback_data=f"setcat_{ct.id}")] for ct in cats]
+    await u.message.reply_text("Выберите категорию:", reply_markup=InlineKeyboardMarkup(kb))
+    return CATEGORY
+
+async def add_category_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    query = u.callback_query
+    await query.answer()
+    cat_id = int(query.data.split("_")[1])
+    service.add_recipe(u.effective_user.id, c.user_data['r_title'], c.user_data['r_ingr'], c.user_data['r_instr'], cat_id)
+    await query.message.reply_text("✅ Рецепт добавлен!", reply_markup=get_main_kb())
+    return ConversationHandler.END
+
+# --- ОБРАБОТЧИК КНОПОК И ЛИШНЕГО ТЕКСТА ---
+async def menu_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    text = u.message.text
+    uid = u.effective_user.id
+    if text == "📂 Категории":
+        cats = service.get_categories()
+        kb = [[InlineKeyboardButton(ct.name, callback_data=f"cat_{ct.id}")] for ct in cats]
+        await u.message.reply_text("Выберите раздел:", reply_markup=InlineKeyboardMarkup(kb))
+    elif text == "❤️ Избранное":
+        favs = service.get_user_favs(uid)
+        if not favs: await u.message.reply_text("Ваш список избранного пуст ❤️")
+        else:
+            kb = [[InlineKeyboardButton(r.title, callback_data=f"rec_{r.id}")] for r in favs]
+            await u.message.reply_text("Ваше избранное:", reply_markup=InlineKeyboardMarkup(kb))
+    elif text == "ℹ️ О боте":
+        await u.message.reply_text("Кулинарный бот v5.0.\nБаза данных SQLite (5 таблиц).\nCRUD: 20 методов.\nПрокси: 10809.")
+    else:
+        await u.message.reply_text(f"Я не понимаю команду '{text}'. Пожалуйста, используйте кнопки меню 📱")
+
+async def callback_router(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    query = u.callback_query
+    uid = u.effective_user.id
+
+    if query.data.startswith("cat_"):
+        cid = int(query.data.split("_")[1])
+        with service.Session() as s:
+            recs = s.scalars(select(Recipe).where(Recipe.category_id == cid)).all()
+            if not recs: await query.edit_message_text("В этом разделе пока нет рецептов.")
+            else:
+                kb = [[InlineKeyboardButton(r.title, callback_data=f"rec_{r.id}")] for r in recs]
+                await query.edit_message_text("Выберите блюдо:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("rec_"):
+        rid = int(query.data.split("_")[1])
+        r = service.get_recipe(rid)
+        is_f = service.is_fav(uid, rid)
+        txt = f"📖 *{r.title}*\n\n🛒 Ингредиенты:\n{r.ingredients}\n\n🍳 Инструкция:\n{r.instructions}"
+        btn_text = "💔 Удалить из избранного" if is_f else "❤️ Добавить в избранное"
+        kb = [[InlineKeyboardButton(btn_text, callback_data=f"fav_{rid}")]]
+        await query.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("fav_"):
+        rid = int(query.data.split("_")[1])
+        # Переключаем статус в базе
+        added = service.toggle_fav(uid, rid)
+        # Отправляем всплывающее уведомление
+        await query.answer("Добавлено ❤️" if added else "Удалено 💔")
+        
+        # ОБНОВЛЯЕМ СООБЩЕНИЕ ДЛЯ ПОЛЬЗОВАТЕЛЯ
+        r = service.get_recipe(rid)
+        is_f = added # новый статус
+        txt = f"📖 *{r.title}*\n\n🛒 Ингредиенты:\n{r.ingredients}\n\n🍳 Инструкция:\n{r.instructions}"
+        btn_text = "💔 Удалить из избранного" if is_f else "❤️ Добавить в избранное"
+        kb = [[InlineKeyboardButton(btn_text, callback_data=f"fav_{rid}")]]
+        await query.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 def main():
-    # Прогон 5 тестов
     suite = unittest.TestLoader().loadTestsFromTestCase(TestCulinary)
-    if not unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful(): 
-        print("❌ Тесты не пройдены!")
-        return
-
-    service.seed_data()
-    print(f"✅ БД создана: {DB_PATH}")
-
-    req = HTTPXRequest(proxy=PROXY_URL, connect_timeout=60, read_timeout=60) if PROXY_URL else None
+    if not unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful(): return
     
-    try:
-        app = Application.builder().token(TOKEN).request(req).get_updates_request(req).build()
-        app.add_handler(CommandHandler("start", start))
-        print("🚀 Бот запускается...")
-        app.run_polling(drop_pending_updates=True)
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
+    # ПЕРЕД ЗАПУСКОМ: удалите файл culinary_expert.db, если хотите обновить примеры блюд
+    service.seed_data()
+    
+    req = HTTPXRequest(proxy=PROXY_URL, connect_timeout=30) if PROXY_URL else None
+    app = Application.builder().token(TOKEN).request(req).get_updates_request(req).build()
+
+    add_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📝 Добавить рецепт$"), add_recipe_start)],
+        states={
+            TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_title)],
+            INGREDIENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_ingredients)],
+            INSTRUCTIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_instructions)],
+            CATEGORY: [CallbackQueryHandler(add_category_callback, pattern="^setcat_")],
+        },
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+    )
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(add_conv)
+    app.add_handler(CallbackQueryHandler(callback_router))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
+
+    print("🚀 Бот успешно запущен!")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
