@@ -120,7 +120,7 @@ class TestCulinaryExpert(unittest.TestCase):
             self.assertIsNotNone(r)
             self.assertEqual(r.category.name, "Завтраки")
 
-    # НОВЫЙ ТЕСТ 1: Регистрация пользователя
+    
     def test_user_registration(self):
         """Проверка корректной регистрации пользователя"""
         self.service.register_user(12345, "ivan_bot", "Ivan")
@@ -130,7 +130,7 @@ class TestCulinaryExpert(unittest.TestCase):
             self.assertEqual(user.first_name, "Ivan")
             self.assertEqual(user.username, "ivan_bot")
 
-    # НОВЫЙ ТЕСТ 2: Связь Пользователь -> Рецепты
+  
     def test_user_recipes_link(self):
         """Проверка того, что рецепты привязаны к автору"""
         uid = 500
@@ -145,7 +145,7 @@ class TestCulinaryExpert(unittest.TestCase):
             titles = [r.title for r in user.recipes]
             self.assertIn("Стейк", titles)
 
-    # НОВЫЙ ТЕСТ 3: Ошибка категории
+
     def test_invalid_category_handling(self):
         """Проверка того, что рецепт не добавляется в несуществующую категорию"""
         self.service.register_user(1, "admin", "Admin")
