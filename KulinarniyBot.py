@@ -1,5 +1,6 @@
 import logging
 import unittest
+import os
 from datetime import datetime
 from typing import List, Optional
 from sqlalchemy import create_engine, String, Text, ForeignKey, select
@@ -10,12 +11,11 @@ from telegram.ext import (
     ContextTypes, MessageHandler, filters, ConversationHandler
 )
 from telegram.request import HTTPXRequest
+from dotenv import load_dotenv
 
 # ==========================================
 # КОНФИГУРАЦИЯ
 # ==========================================
-import os
-from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 PROXY_URL = "http://127.0.0.1:10809"  
@@ -101,7 +101,7 @@ class CulinaryService:
 # ==========================================
 class TestCulinaryExpert(unittest.TestCase):
     def setUp(self):
-        # Тесты всегда запускаются в оперативной памяти
+        # Тесты всегда запускаются в оперативной памяти (чистое окружение)
         self.service = CulinaryService("sqlite:///:memory:")
         self.service.seed_data()
 
@@ -120,8 +120,44 @@ class TestCulinaryExpert(unittest.TestCase):
             self.assertIsNotNone(r)
             self.assertEqual(r.category.name, "Завтраки")
 
+    # НОВЫЙ ТЕСТ 1: Регистрация пользователя
+    def test_user_registration(self):
+        """Проверка корректной регистрации пользователя"""
+        self.service.register_user(12345, "ivan_bot", "Ivan")
+        with self.service.Session() as session:
+            user = session.get(User, 12345)
+            self.assertIsNotNone(user)
+            self.assertEqual(user.first_name, "Ivan")
+            self.assertEqual(user.username, "ivan_bot")
+
+    # НОВЫЙ ТЕСТ 2: Связь Пользователь -> Рецепты
+    def test_user_recipes_link(self):
+        """Проверка того, что рецепты привязаны к автору"""
+        uid = 500
+        self.service.register_user(uid, "chef", "Gordon")
+        self.service.add_recipe(uid, "Стейк", "Горячее", "Мясо", "Жарить")
+        self.service.add_recipe(uid, "Пюре", "Горячее", "Картошка", "Варить")
+        
+        with self.service.Session() as session:
+            user = session.get(User, uid)
+            # Проверяем количество рецептов через связь в ORM
+            self.assertEqual(len(user.recipes), 2)
+            titles = [r.title for r in user.recipes]
+            self.assertIn("Стейк", titles)
+
+    # НОВЫЙ ТЕСТ 3: Ошибка категории
+    def test_invalid_category_handling(self):
+        """Проверка того, что рецепт не добавляется в несуществующую категорию"""
+        self.service.register_user(1, "admin", "Admin")
+        # Пытаемся добавить в категорию 'Космос' (ее нет в seed_data)
+        self.service.add_recipe(1, "Звездная пыль", "Космос", "Пыль", "Собрать")
+        
+        with self.service.Session() as session:
+            r = session.scalar(select(Recipe).where(Recipe.title == "Звездная пыль"))
+            self.assertIsNone(r) # Рецепт не должен быть создан
+
 def run_tests():
-    print("🧪 Запуск модульных тестов...")
+    print("🧪 Запуск модульных тестов (5 тестов)...")
     suite = unittest.TestLoader().loadTestsFromTestCase(TestCulinaryExpert)
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     return result.wasSuccessful()
@@ -144,6 +180,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(f"📂 {c.name}", callback_data=f"cat_{c.id}")] for c in cats]
     await update.message.reply_text("Выберите категорию:", reply_markup=InlineKeyboardMarkup(kb))
 
+# ... остальной код бота без изменений ...
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "📂 Категории":
@@ -152,7 +189,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = [[InlineKeyboardButton(f"📂 {c.name}", callback_data=f"cat_{c.id}")] for c in cats]
         await update.message.reply_text("Категории блюд:", reply_markup=InlineKeyboardMarkup(kb))
     elif text == "ℹ️ О боте":
-        await update.message.reply_text("Бот 'Книга Рецептов' v2.6\nВсе тесты пройдены успешно!")
+        await update.message.reply_text("Бот 'Книга Рецептов' v2.7\nВсе тесты (5/5) пройдены успешно!")
     else:
         await update.message.reply_text("Это что-то на не съедобном 🥴")
 
@@ -174,7 +211,6 @@ async def browse_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = f"📖 *{r.title}*\n\n🛒 *Ингредиенты:*\n{r.ingredients}\n\n🍳 *Инструкция:*\n{r.instructions}"
             await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cat_{r.category_id}")]]))
 
-# --- Диалог добавления ---
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.callback_query.message if update.callback_query else update.message
     if update.callback_query: await update.callback_query.answer()
@@ -204,15 +240,12 @@ async def add_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Рецепт сохранен!", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
 
-# ==========================================
-# ЗАПУСК
-# ==========================================
 def main():
     if not run_tests():
         print("❌ Тесты провалены. Запуск бота отменен.")
         return
 
-    print("✅ Тесты пройдены. Запуск бота...")
+    print("✅ Все 5 тестов пройдены. Запуск бота...")
     service.seed_data()
     
     request = HTTPXRequest(proxy=PROXY_URL, connect_timeout=20.0, read_timeout=20.0)
